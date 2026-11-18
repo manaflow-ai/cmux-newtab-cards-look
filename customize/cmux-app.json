@@ -1,0 +1,21 @@
+{
+  "$schema": "https://cmux.dev/schemas/cmux-app/2.json",
+  "manifestVersion": 2,
+  "id": "local/customize",
+  "name": { "en": "Cards New Tab" },
+  "version": "1.0.0",
+  "description": "The Cards New Tab page: one rounded field, the project and agent under it, then the three most recent chats as cards.",
+  "engines": { "cmux": "^2.0" },
+  "repository": "https://github.com/local/customize",
+  "runtime": { "main": "main.js" },
+  "implements": {
+    "cmux.newtab/1": { "export": "renderNewTab", "title": "Cards", "symbol": "square.grid.2x2" }
+  },
+  "scopes": {
+    "agent_chat:read": "Read your recent agent chats: title, state, folder and times.",
+    "actions:run": "Start a chat from the field and open a chat you click.",
+    "workspace:write": "Show a chat's workspace when you click its card."
+  },
+  "activation": ["onInterface:cmux.newtab/1"],
+  "files": ["main.js"]
+}
