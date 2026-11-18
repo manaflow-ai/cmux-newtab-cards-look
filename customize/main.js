@@ -21,21 +21,30 @@ const [agent, setAgent] = signal(null)
 const message = (e) => (e instanceof Error ? e.message : (e && e.message) || String(e))
 const lastActivity = (c) => Math.max(c.updated_ms || 0, c.since_ms || 0, c.created_ms || 0)
 
-// The recent chats, newest first. A host with server-side reads (limit) cuts and orders them; an
-// older one answers every chat, which this look then orders and cuts itself.
+const needsYou = (c) => c.state === "input" || c.state === "failed" || c.state === "lost"
+const need = (c) => (c.state === "input" ? 0 : needsYou(c) ? 1 : 2)
+// As cmux's cards order them: the chats that need you first (needs input, then failed), then the
+// rest newest first.
+const byNeed = (list) => [...list].sort((a, b) => need(a) - need(b) || lastActivity(b) - lastActivity(a))
+
+// The three cards. A host with server-side reads (limit, state) cuts and orders the recent chats
+// and the ones that need you; an older one answers every chat, which this look orders and cuts.
 let hostCuts = true
 async function readRecent() {
   if (hostCuts) {
     try {
-      const page = await cmux.call("agent_chat.list", { limit: RECENT })
-      return page.chats.slice(0, RECENT)
+      const [recent, waiting] = await Promise.all([
+        cmux.call("agent_chat.list", { limit: RECENT }),
+        cmux.call("agent_chat.list", { limit: RECENT, state: ["input", "failed", "lost"] })
+      ])
+      const first = waiting.chats.filter(needsYou)
+      return byNeed([...first, ...recent.chats.filter((c) => !first.some((w) => w.id === c.id))]).slice(0, RECENT)
     } catch (e) {
       if (!/param/i.test(message(e))) throw e
       hostCuts = false
     }
   }
-  const all = (await cmux.call("agent_chat.list", {})).chats
-  return all.sort((a, b) => lastActivity(b) - lastActivity(a)).slice(0, RECENT)
+  return byNeed((await cmux.call("agent_chat.list", {})).chats).slice(0, RECENT)
 }
 
 // One read at a time; a change during a read reads once more after it.
@@ -80,19 +89,21 @@ function age(ms) {
   return hours < 24 ? `${hours}h` : `${Math.round(hours / 24)}d`
 }
 
-// What a card says under its title: what the chat waits on, else its last reply.
+// What a card says under its title, as cmux's cards do: the state when the chat is not idle, else
+// its last reply.
 function cardMessage(c) {
-  if (c.state === "input") return { text: "Needs your input", tone: "warning" }
-  if (c.state === "failed" || c.state === "lost") return { text: c.error || "Failed", tone: "danger" }
-  if (c.state === "working") return { text: c.step || "Working", tone: "secondary" }
-  const text = c.preview || c.step || ""
-  return text ? { text, tone: "secondary" } : null
+  if (c.state === "input") return { text: "Needs input", tone: "warning" }
+  if (c.state === "failed" || c.state === "lost") return { text: "Failed", tone: "danger" }
+  if (c.state === "working") return { text: "Running", tone: "secondary" }
+  if (c.unread) return { text: "Unread", tone: "secondary" }
+  return c.preview ? { text: c.preview, tone: "secondary" } : null
 }
 
-// The agent's mark: its own logo where the host has one, else the chat glyph.
-const markOf = (harness) => (harness === "codex" ? "terminal" : "sparkle")
+// The agent's mark. Scene icons are cmux's icon pack, which has no agent logos yet (GAPS.md), so
+// every agent gets the chat glyph.
+const markOf = () => "agent.chat"
 
-const folderName = (cwd) => (cwd || "").replace(/\/+$/, "").split("/").pop() || "No project"
+const folderName = (cwd) => (cwd || "").replace(/\/+$/, "").split("/").pop() || "No folder"
 
 async function start() {
   const text = draft().trim()
@@ -117,38 +128,50 @@ async function open(chat) {
 // The field: one rounded pill with the prompt and Send.
 function field() {
   return Panel({ style: "card" }, [
-    HStack({ spacing: 8 }, [
-      TextField(draft, { placeholder: "Ask anything", autofocus: true, onEdit: setDraft, onSubmit: start }).font(15),
-      Button(Icon("arrow.up").size(13), start)
-        .frame({ width: 32, height: 32 })
-        .cornerRadius(16)
-        .background(() => (draft().trim() ? "primary" : "hover"))
-        .color(() => (draft().trim() ? "#FFFFFF" : "tertiary"))
+    HStack({ spacing: 12 }, [
+      Icon("action.add").size(16).color("secondary"),
+      TextField(draft, { placeholder: "Ask anything or type a URL", autofocus: true, onEdit: setDraft, onSubmit: start })
+        .font(15)
+        .frame({ maxWidth: "infinity" }),
+      Spacer(),
+      Button(Icon("composer.send").size(15), start)
+        .frame({ width: 30, height: 30 })
+        .cornerRadius(15)
+        .background(() => (draft().trim() ? "primary" : "#00000000"))
+        .color(() => (draft().trim() ? "#FFFFFF" : "secondary"))
         .help("Send")
     ])
-      .paddingHorizontal(14)
-      .frame({ minHeight: 40 })
+      .paddingHorizontal(16)
+      .frame({ minHeight: 36 })
   ])
-    .cornerRadius(28)
+    .cornerRadius(999)
 }
 
-// Under the field: the project the chat starts in, and the agent.
-function chips(ctx) {
+// Over the field: the folder the chat starts in and the machine it runs on.
+function place(ctx) {
+  return HStack({ spacing: 20 }, [
+    HStack({ spacing: 6 }, [Icon("folder").size(14).color("secondary"), Text(folderName(ctx.cwd)).font(14).color("secondary").lineLimit(1)])
+      .help(ctx.cwd || "No folder"),
+    HStack({ spacing: 6 }, [Icon("machine.local").size(14).color("secondary"), Text("This Mac").font(14).color("secondary")]),
+    Spacer()
+  ]).paddingHorizontal(18)
+}
+
+// Under the field: the agent the chat starts with.
+function footer() {
   const agentTitle = () => {
     const picked = agents().find((a) => a.id === agent())
     return picked ? picked.name : "Agent"
   }
   return HStack({ spacing: 12 }, [
-    HStack({ spacing: 5 }, [Icon("folder").size(12).color("tertiary"), Text(folderName(ctx.cwd)).font("caption").color("secondary").lineLimit(1)])
-      .help(ctx.cwd || "No project"),
     Spacer(),
     () =>
       agents().length
         ? Menu(agentTitle, agents().map((a) => Button(a.name, () => setAgent(a.id))))
-            .font("caption")
+            .font(14)
             .color("secondary")
         : null
-  ]).paddingHorizontal(20)
+  ]).paddingHorizontal(28)
 }
 
 function card(chat) {
@@ -177,7 +200,7 @@ function recent() {
     HStack({ spacing: 12 }, [
       Text("Chats").font(13).weight("semibold").color("primary").paddingHorizontal(16).paddingVertical(4).background("hover").cornerRadius(999),
       Spacer(),
-      Button(HStack({ spacing: 2 }, [Text("All Chats").font("caption"), Icon("chevron.right").size(10)]), () =>
+      Button(HStack({ spacing: 4 }, [Text("All Chats").font(13), Icon("nav.forward").size(11)]), () =>
         cmux.actions.run("search.chats").catch((e) => cmux.toast({ title: "Cannot show all chats", message: message(e), tone: "warning" }))
       ).color("tertiary")
     ]).frame({ height: 34 }),
@@ -206,7 +229,7 @@ function renderNewTab(ctx) {
   // ages tick.
   cmux.events.on("agent_chat.changed", load)
   cmux.timer.every(30000, () => setNow(Date.now()))
-  return VStack({ spacing: 12, alignment: "leading" }, [field(), chips(ctx), recent().padding({ top: 24 })]).padding({ top: 24 })
+  return VStack({ spacing: 12, alignment: "leading" }, [place(ctx), field(), footer(), recent().padding({ top: 56 })]).padding({ top: 32 })
 }
 
 globalThis.__cmuxAppExports = { renderNewTab }
